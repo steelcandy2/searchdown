@@ -1,0 +1,155 @@
+#+title: searchdown
+#+date: <2022-01-27 Thu 12:31>
+#+description: README file for the 'searchdown' program.
+
+Searchdown provides a simpler, pithier and (arguably) more standard interface
+for =find …= and =find … | xargs …= commands, with additional support for
+=find … | xargs grep …= commands.
+
+Below is the formal documentation (and usage message) for =searchdown=. See
+the corresponding [[https://blog0.steelcandy.org/2022-01-26-searchdown-find-and-grep-redux.html][blog post]] for a more informal and expansive introduction to
+the program.
+
+=usage: searchdown [opts] [-- [cmd-word...]]=
+
+If the options '=opts=' contain one or more of the help options
+=--help=, =-h= or =-?= then this usage message is output to standard
+out and no search is performed.
+
+Otherwise this command performs a search consisting of a =find=
+command whose results are processed by one =grep= command for each
+'=-g=' option (see below), in the order the '=-g=' options are given
+on the command line. If no '=-g=' options are given then just the
+=find= command's output is output.
+
+The options can be split into two categories: short options and
+long options. The long options all start with two dashes (=--=)
+and for the most part map directly to options with the same name
+on the =find= command, except that they start with a single dash.
+Those options are: =--amin=, =--anewer=, =--atime=, =--cmin=, =--cnewer=,
+=--ctime=, =--empty=, =--fstype=, =--gid=, =--group=, =--iname=, =--links=,
+=--mmin=, =--mtime=, =--name=, =--newer=, =--nogroup=, =--nouser=, =--perm=,
+=--samefile=, =--size=, =--uid=, =--user= and =--xdev=. See the =find=
+command documentation for more information about each of these
+options.
+
+The only other long option is =--depth=, which maps to the =find=
+command's =--mindepth= and/or =--maxdepth= options. If its argument
+
+    - is a single non-negative integer then it maps to both a
+      =--mindepth= and a =--maxdepth= option, both with the same
+      argument
+    - is a single non-negative integer followed by a dash (-)
+      then it maps to a =--mindepth= option with the integer as
+      its argument
+    - is a pair of non-negative integers separated by a dash
+      then it maps to a =--mindepth= option whose argument is the
+      first integer, and a =--maxdepth= option whose argument is
+      the second integer
+
+Only a unique prefix of a long option name needs to be given:
+that is, a prefix that no other long option starts with. So
+'=--d=' (or '=--de=' or '=--dep=') can be used instead of '=--depth=',
+but using '=--s=' will result in an error since it is a prefix of
+both '=--size=' and '=--samefile='. (If a long option's full name is
+given then that option will be the one used, even if it's also
+the prefix of another long option's name.) Since new long options
+may be added to this command in the future, long option name
+prefixes should only be used interactively (and not in scripts,
+for example).
+
+The short options start with a single dash (=-=). Several of them
+are convenient shorthands for find command options:
+
+    - "=-p prefix=" is short for "=--name 'prefix*'="
+    - "=-s suffix=" is short for "=--name '*suffix'="
+    - "=-c part="   is short for "=--name '*part*'="
+    - "=-i part="   is short for "=--iname '*part*'="
+    - "=-e ext="    is short for "=--name '*ext'=" if '=ext=' starts
+        with a period, and for "=--name '*.ext'=" if it doesn't
+
+By default the current working directory is searched, but if one
+or more '=-D=' options are specified then each one's argument is
+taken to be the pathname of a directory to search under instead.
+
+The '=-S=' option can be used to specify directories to skip when
+searching: they're not descended into and so neither they nor
+any of their contents can match. This option can be specified
+multiple times to skip multiple directories.
+
+The '=-v=' option indicates that the command should produce more
+output: specifically, it writes to standard error the shell
+command that will be executed to perform the search.
+
+The '=-n=' option indicates that the command should NOT perform
+the search, but should just write to standard error the shell
+command that would have been executed to perform the search.
+
+The '=-t=' option specifies the types of files that are and are
+not potential search matches. Its argument is of the form
+'=t1-t2=' where either =t1= or =t2= can be omitted (but not both),
+and both =t1= and =t2= consist of sequences of the letters that
+are valid arguments to the find command's =-type= option. Those
+letters in =t1= specify the types of files that are to be
+included in the search (unless they're also in =t2=) and the
+letters in =t2= specify the types of files that are to be excluded
+from the search (though if directories are excluded their
+contents may still be included in the search).
+
+The '=-f=' option specifies the general format of the basenames of
+potential search matches. Its argument '=arg=' consists of one or
+more of these letters: =a=, =u=, =l=, =n=, =b=, =s=, =p=. Duplicates are
+ignored. If '=arg=' contains '=b=' then a basename has to end with a
+'=~=', and that '=~=' is ignored by the other letters in '=arg='. If
+'=arg=' contains
+
+    - a '=p=' and an '=s=' then the other letters in '=arg=' specify
+      what the first and last characters in a basename must be
+    - a '=p=' (but no '=s=') then the other letters in '=arg=' specify
+      what the first character in a basename must be
+    - an '=s=' (but no '=p=') then the other letters in '=arg=' specify
+      what the last character in a basename must be
+    - neither a '=p=' nor an '=s=' then the other letters in '=arg='
+      specify what ALL of the characters in a basename must be,
+
+where '=u=' specifies uppercase letters, '=l=' specifies lowercase
+letters, '=a=' specifies uppercase or lowercase letters, and '=n='
+specifies numeric digits.
+
+The first '=-g=' option describes the =grep= command to use to
+process the contents of the files selected by the =find= command,
+and each subsequent '=-g=' option describes the =grep= command to
+use to process the output of the previous =grep= command. Each
+option is of the form
+
+#+begin_example
+    -g[bEFhilnTvwxoZA#B#C#] pattern
+#+end_example
+
+where there cannot be a space between the '=-g=' and any suboptions
+(or between any of the suboptions or their arguments) and there
+must be a space before the '=pattern='. Each of the suboptions
+after the '=-g=' map to the grep option of the same name, and each
+'=#=' can either be omitted or a non-negative integer (where it
+defaults to 1 if it's omitted). See the =grep= command
+documentation for more information about each of the options and
+the valid patterns.
+
+By default the first '=-g=' option will treat binary files as
+though they contain no matches, But if the '=-b=' option is
+specified then =grep='s default binary file handling is used.
+
+If one or more '=cmd-word=' arguments are present then each line of
+the results of the search (or each pathname if no '=-g=' options
+were specified) will be passed to the shell command consisting of
+all of the '=cmd-word=' words. For example,
+
+#+begin_example
+    searchdown -fb -- rm
+#+end_example
+
+will find and delete all backup files under the current working
+directory, regardless of what strange characters may be in those
+files' names. We require that the '=cmd-word='s always be preceded
+by the two-dash '=--=' argument to prevent erroneous options from
+being interpreted as a command.
