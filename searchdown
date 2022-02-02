@@ -1,0 +1,1634 @@
+#!/usr/bin/env python3
+# -*- eval: (read-only-mode 1) -*-
+## Searches files' names and contents in and under one or more directories.
+## (This is a combination of the UNIX 'find' and 'grep' commands.)
+#
+# See also: searchdown-aliases.sh, find, grep.
+#
+# Copyright (C) 2013-2022 by James MacKay.
+#
+#-This program is free software: you can redistribute it and/or modify
+#-it under the terms of the GNU General Public License as published by
+#-the Free Software Foundation, either version 3 of the License, or
+#-(at your option) any later version.
+#
+#-This program is distributed in the hope that it will be useful,
+#-but WITHOUT ANY WARRANTY; without even the implied warranty of
+#-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#-GNU General Public License for more details.
+#
+#-You should have received a copy of the GNU General Public License
+#-along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+
+import subprocess
+import os, sys
+
+
+# Constants, part 1.
+
+# The optimzation level for the find command.
+_findOptimizationLevel = 2
+
+# A list of all options that are automatically added to the first grep
+# subcommand, iff there is one.
+#
+# Note: the -H option ensures that each line is prefixed with the filename,
+# even when the find command only finds one file. The -d and -D options
+# cause grep to silently ignore directories and device files, respectively.
+#
+# Note: the '-I' option isn't included here since our '-b' option will
+# cause us to not use it.
+_firstGrepCommandOptions = ["-H", "-d skip", "-D skip"]
+
+# The pathname of the directory to start searching in if one (or more) isn't
+# specified.
+_defaultStartingDir = "."
+
+# The names of all of the pattern suboptions that don't take any arguments.
+_zeroArgPatternSubopts = [x for x in "bEFhilnTvwxoZ"]
+
+# The names of all of the pattern suboptions that take at most one argument.
+_oneArgPatternSubopts = [x for x in "ABC"]
+
+# The default value to use as the argument to pattern suboptions that can
+# take an argument but for which one isn't specified.
+_defaultPatternSuboptArg = 1
+
+
+# The names (without any leading dashes) of all of the zero-argument find
+# command options that should precede all late options.
+#
+# Note: this should contain the names of what the find command calls options,
+# though only the kind that can appear as part of the expression - like
+# "-xdev" - and not "true" options like "-H" and "-D".
+_zeroArgumentEarlyFindOptionNames = ["xdev"]
+
+# The names (without any leading dashes) of all of the zero-argument find
+# command options that should follow all early options.
+_zeroArgumentLateFindOptionNames = ["empty", "nogroup", "nouser"]
+
+# The names (without any leading dashes) of all of the one-argument find
+# command options that should follow all early options.
+_oneArgumentLateFindOptionNames = ["amin", "anewer", "atime", "cmin",
+    "cnewer", "ctime", "depth", "fstype", "gid", "group", "iname", "links",
+    "mmin", "mtime", "name", "newer", "perm", "samefile", "size", "uid",
+    "user"]
+
+# The name of our "depth" option (which replaces the "-mindepth" and
+# "-maxdepth" find command options).
+_depthOptionName = "depth"
+
+# A list of the names of all of the short options that indicate that help
+# about how to use this command should be displayed instead of executing it.
+_shortHelpOpts = [x for x in "?h"]
+
+# A list of the names of all of the long options that indicate that help
+# about how to use this command should be displayed instead of executing it.
+_longHelpOpts = ["help"]
+
+
+# Format characters (for use with our '-f' option).
+_charTypeFormatChars = "auln"
+_backupFormatChars = "b"
+_positionFormatChars = "sp"
+_charTypeAndBackupFormatChars = _charTypeFormatChars + _backupFormatChars
+_allFormatChars = _charTypeAndBackupFormatChars + _positionFormatChars
+
+
+# Error message formats.
+
+_tooFewOptionArgsMsg = """
+There must be at least {} arguments after the '{}' option,
+but there are only {}"""
+
+_noOptionArgsMsg = """
+There must be at least {} argument after the '{}' option,
+but there are {}"""
+
+_onlyOneOptionArgMsg = """
+There must be at least {} arguments after the '{}' option,
+but there us only {}"""
+
+
+_unexpectedArgumentMsg = """
+Unexpected argument '{}' found: it must be preceded
+by '--' if it's the start of a final command"""
+
+_unmatchedLongOptionMsg = """
+There is no long option that matches '{}'"""
+
+_multipleLongOptionMatchesMsg = """
+There are {} long options that start with '{}':
+{}"""
+
+_unmatchedShortOptionMsg = """
+The option '{}' is not a valid (short) option"""
+
+_invalidDepthArgMsg = """
+The argument '{}' to the '{}' option is invalid: it must be of
+the form n, n- or n-m, where n and m are non-negative integers
+and m is greater than or equal to n"""
+
+_unknownPatternSuboptionMsg = """
+The suboption '{}' is not a valid suboption for the '-g' option:
+found in the option that starts with '{}'"""
+
+_patternMissingMsg = """
+The pattern is missing after the option(s) '{}'."""
+
+_invalidFormatCharMsg = """
+The character '{}' in the format '{}' is not a valid format
+character"""
+
+_noBackupOrCharsInFormatMsg = """
+The format '{}' is invalid because it doesn't contain any of
+the following characters: """ + ", ".join([x for x in
+                                          _charTypeAndBackupFormatChars])
+
+_shortUsageMsg = """
+usage: {progName} [opts] [-- [cmd-word...]]
+
+If the options 'opts' contain one or more of the help options
+--help, -h or -? then the full version of this usage message is
+output to standard out and no search is performed. (Our full
+version is long enough that you may want to pipe it through a
+pager program like 'less').
+
+Otherwise this command performs a search consisting of a find
+command whose results are processed by one grep command for each
+'-g' option, in the order the '-g' options are given on the
+command line. If no '-g' options are given then just the find
+command's output is output.
+""".format(progName = "{progName}")
+
+_longUsageMsg = """
+usage: {progName} [opts] [-- [cmd-word...]]
+
+If the options 'opts' contain one or more of the help options
+--help, -h or -? then this usage message is output to standard
+out and no search is performed.
+
+Otherwise this command performs a search consisting of a find
+command whose results are processed by one grep command for each
+'-g' option (see below), in the order the '-g' options are given
+on the command line. If no '-g' options are given then just the
+find command's output is output.
+
+The options can be split into two categories: short options and
+long options. The long options all start with two dashes (--)
+and for the most part map directly to options with the same name
+on the find command, except that they start with a single dash.
+Those options are: --amin, --anewer, --atime, --cmin, --cnewer,
+--ctime, --empty, --fstype, --gid, --group, --iname, --links,
+--mmin, --mtime, --name, --newer, --nogroup, --nouser, --perm,
+--samefile, --size, --uid, --user and --xdev. See the find
+command documentation for more information about each of these
+options.
+
+The only other long option is --depth, which maps to the find
+command's --mindepth and/or --maxdepth options. If its argument
+
+    - is a single non-negative integer then it maps to both a
+      --mindepth and a --maxdepth option, both with the same
+      argument
+    - is a single non-negative integer followed by a dash (-)
+      then it maps to a --mindepth option with the integer as
+      its argument
+    - is a pair of non-negative integers separated by a dash
+      then it maps to a --mindepth option whose argument is the
+      first integer, and a --maxdepth option whose argument is
+      the second integer
+
+Only a unique prefix of a long option name needs to be given:
+that is, a prefix that no other long option starts with. So
+'--d' (or '--de' or '--dep') can be used instead of '--depth',
+but using '--s' will result in an error since it is a prefix of
+both '--size' and '--samefile'. (If a long option's full name is
+given then that option will be the one used, even if it's also
+the prefix of another long option's name.) Since new long options
+may be added to this command in the future, long option name
+prefixes should only be used interactively (and not in scripts,
+for example).
+
+The short options start with a single dash (-). Several of them
+are convenient shorthands for find command options:
+
+    - "-p prefix" is short for "--name 'prefix*'"
+    - "-s suffix" is short for "--name '*suffix'"
+    - "-c part"   is short for "--name '*part*'"
+    - "-i part"   is short for "--iname '*part*'"
+    - "-e ext"    is short for "--name '*ext'" if 'ext' starts
+        with a period, and for "--name '*.ext'" if it doesn't
+
+By default the current working directory is searched, but if one
+or more '-D' options are specified then each one's argument is
+taken to be the pathname of a directory to search under instead.
+
+The '-S' option can be used to specify directories to skip when
+searching: they're not descended into and so neither they nor
+any of their contents can match. This option can be specified
+multiple times to skip multiple directories.
+
+The '-v' option indicates that the command should produce more
+output: specifically, it writes to standard error the shell
+command that will be executed to perform the search.
+
+The '-n' option indicates that the command should NOT perform
+the search, but should just write to standard error the shell
+command that would have been executed to perform the search.
+
+The '-t' option specifies the types of files that are and are
+not potential search matches. Its argument is of the form
+'t1-t2' where either t1 or t2 can be omitted (but not both),
+and both t1 and t2 consist of sequences of the letters that
+are valid arguments to the find command's -type option. Those
+letters in t1 specify the types of files that are to be
+included in the search (unless they're also in t2) and the
+letters in t2 specify the types of files that are to be excluded
+from the search (though if directories are excluded their
+contents may still be included in the search).
+
+The '-f' option specifies the general format of the basenames of
+potential search matches. Its argument 'arg' consists of one or
+more of these letters: {allFormatChars}. Duplicates are
+ignored. If 'arg' contains 'b' then a basename has to end with a
+'~', and that '~' is ignored by the other letters in 'arg'. If
+'arg' contains
+
+    - a 'p' and an 's' then the other letters in 'arg' specify
+      what the first and last characters in a basename must be
+    - a 'p' (but no 's') then the other letters in 'arg' specify
+      what the first character in a basename must be
+    - an 's' (but no 'p') then the other letters in 'arg' specify
+      what the last character in a basename must be
+    - neither a 'p' nor an 's' then the other letters in 'arg'
+      specify what ALL of the characters in a basename must be,
+
+where 'u' specifies uppercase letters, 'l' specifies lowercase
+letters, 'a' specifies uppercase or lowercase letters, and 'n'
+specifies numeric digits.
+
+The first '-g' option describes the grep command to use to
+process the contents of the files selected by the find command,
+and each subsequent '-g' option describes the grep command to
+use to process the output of the previous grep command. Each
+option is of the form
+
+    -g[{zeroArgSubopts}{oneArgSubopts}] pattern
+
+where there cannot be a space between the '-g' and any suboptions
+(or between any of the suboptions or their arguments) and there
+must be a space before the 'pattern'. Each of the suboptions
+after the '-g' map to the grep option of the same name, and each
+'#' can either be omitted or a non-negative integer (where it
+defaults to {defaultSuboptArg} if it's omitted). See the grep command
+documentation for more information about each of the options and
+the valid patterns.
+
+By default the first '-g' option will treat binary files as
+though they contain no matches, But if the '-b' option is
+specified then grep's default binary file handling is used.
+
+If one or more 'cmd-word' arguments are present then each line of
+the results of the search (or each pathname if no '-g' options
+were specified) will be passed to the shell command consisting of
+all of the 'cmd-word' words. For example,
+
+    {progName} -fb -- rm
+
+will find and delete all backup files under the current working
+directory, regardless of what strange characters may be in those
+files' names. We require that the 'cmd-word's always be preceded
+by the two-dash '--' argument to prevent erroneous options from
+being interpreted as a command.
+""".format(progName = "{progName}",
+           allFormatChars = ", ".join(_allFormatChars),
+           zeroArgSubopts = "".join(_zeroArgPatternSubopts),
+           oneArgSubopts = "#".join(_oneArgPatternSubopts) + "#",
+           defaultSuboptArg = _defaultPatternSuboptArg)
+
+
+# Classes.
+
+class BasenameFormat(object):
+    """
+    Represents the general format of a file's basename, as given by the
+    argument to our '-f' option.
+    """
+
+    def __init__(self):
+        """
+        Initializes us to be an empty format.
+        """
+        self._canBeUppercase = False
+        self._canBeLowercase = False
+        self._canBeNumeric = False
+        self._isPrefix = False
+        self._isSuffix = False
+        self._isBackup = False
+
+    def isBackup(self):
+        """
+        Returns True iff we only match backup files.
+        """
+        return self._isBackup
+
+    def hasCharactersToMatch(self):
+        """
+        Returns True iff this format contains information about which
+        characters are to be matched.
+        """
+        return (self._canBeNumeric or self._canBeLowercase or
+                self._canBeUppercase)
+
+    def setCanBeUppercase(self, canBe):
+        """
+        Sets whether this format matches uppercase alphabetic characters to
+        'canBe'.
+        """
+        self._canBeUppercase = canBe
+
+    def setCanBeLowercase(self, canBe):
+        """
+        Sets whether this format matches lowercase alphabetic characters to
+        'canBe'.
+        """
+        self._canBeLowercase = canBe
+
+    def setCanBeNumeric(self, canBe):
+        """
+        Sets whether this format matches digit characters to 'canBe'.
+        """
+        self._canBeNumeric = canBe
+
+    def setIsPrefix(self, canBe):
+        """
+        Sets whether this format matches one or more characters at the start
+        of a basename to 'canBe'.
+        """
+        self._isPrefix = canBe
+
+    def setIsSuffix(self, canBe):
+        """
+        Sets whether this format matches one or more characters at the end
+        of a basename - before the '~' character at the end iff we match only
+        backup files - to 'canBe'.
+
+        See setIsBackup().
+        """
+        self._isSuffix = canBe
+
+    def setIsBackup(self, canBe):
+        """
+        Sets whether this format only matches backup files to 'canBe'.
+
+        Note: a basename is the basename of a backup file iff it ends with a
+        '~' character.
+
+        See setIsSuffix().
+        """
+        self._isBackup = canBe
+
+    def toFindOption(self):
+        """
+        Returns the find command option corresponding to this format.
+        """
+        assert self.isBackup() or self.hasCharactersToMatch()
+        chars = ""
+        if self._canBeLowercase:
+            chars += "a-z"
+        if self._canBeUppercase:
+            chars += "A-Z"
+        if self._canBeNumeric:
+            chars += "0-9"
+
+        last = ""
+        if self._isBackup:
+            last = "~"
+        if chars:
+            isPrefix = self._isPrefix
+            isSuffix = self._isSuffix
+            if isPrefix and isSuffix:
+                result = "-name '[{}]*[{}]{}'".format(chars, chars, last)
+            elif isPrefix:
+                result = "-name '[{}]*{}'".format(chars, last)
+            elif isSuffix:
+                result = "-name '*[{}]{}'".format(chars, last)
+            else:
+                result = "-regex '.*/[{}]+{}$'".format(chars, last)
+        else:
+            assert last
+            result = "-name '*{}'".format(last)
+
+        assert result
+        return result
+
+class Option(object):
+    """
+    Represents an option to an external command, such as find or grep.
+    """
+
+    def addCommandParts(self, parts, args):
+        """
+        Adds to the CommandParts 'parts' the command parts corresponding to
+        this option, with our option's arguments coming from the end (NOT the
+        start) of 'args'.
+        """
+        assert parts is not None
+        assert args is not None
+        raise NotImplementedError
+
+    def prefixedOptionName(self):
+        """
+        Returns the name of this option prefixed with the appropriate number
+        of dashes.
+        """
+        # assert result
+        raise NotImplementedError
+
+class AbstractOption(Option):
+    """
+    An abstract base class for Option subclasses.
+    """
+
+    def __init__(self, name):
+        """
+        Initializes us with the name 'name' of this option.
+        """
+        assert name
+        Option.__init__(self)
+        self._name = name
+
+    def _checkEnoughArguments(self, args, numArgsRequired, parts):
+        """
+        Checks that 'args' contains at least 'numArgsRequired' arguments,
+        returning True if it does and adding an error message to the
+        CommandParts 'parts' and returning False if it doesn't.
+        """
+        assert args is not None
+        assert numArgsRequired >= 0
+        assert parts is not None
+        n = len(args)
+        result = (n >= numArgsRequired)
+        if not result:
+            if numArgsRequired == 1:
+                msg = _noOptionArgsMsg
+            elif n == 1:
+                msg = _onlyOneOptionArgMsg
+            else:
+                msg = _tooFewOptionArgsMsg
+            parts.addErrorMessage(msg.format(numArgsRequired,
+                                             self.prefixedOptionName(), n))
+        return result
+
+class AbstractShortOption(AbstractOption):
+    """
+    An abstract base class for short options: options whose names consist of
+    a single letter preceded by a single dash.
+    """
+
+    def prefixedOptionName(self):
+        result = "-" + self._name
+        assert result
+        return result
+
+    def _firstArgument(self, firstArg, otherArgs, parts):
+        """
+        Returns the first argument for our option: the second and subsequent
+        letters in 'firstArg' iff it consists of more than one letter, and
+        the last item in the 'otherArgs' list otherwise (in which case that
+        last argument is removed from 'otherArgs'). If there's not a first
+        argument in 'firstArg' or 'otherArgs' then an error message is added
+        to the CommandParts 'parts' and None is returned.
+        """
+        assert firstArg
+        assert otherArgs is not None
+        assert parts is not None
+        (first, rest) = _firstLetterAndRest(firstArg)
+        if rest:
+            result = rest
+        elif self._checkEnoughArguments(otherArgs, 1, parts):
+            result = otherArgs.pop()
+        else:
+            result = None
+        # 'result' may be None
+        assert (result is not None) or (parts.hasErrorMessages())
+        #   (result is None) implies (parts.hasErrorMessages())
+        return result
+
+class VerboseOption(AbstractShortOption):
+    """
+    Represents '-v' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        (first, rest) = _firstLetterAndRest(firstArg)
+        assert first == "v"
+        parts.setVerbosityLevel(1)
+        if rest:
+            # Assume this argumentless option has been combined with another.
+            _addShortOptionTo(parts, rest, args)
+
+class MatchBinaryFilesOption(AbstractShortOption):
+    """
+    Represents '-b' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        (first, rest) = _firstLetterAndRest(firstArg)
+        assert first == "b"
+        parts.setDoMatchBinaryFiles(True)
+        if rest:
+            # Assume this argumentless option has been combined with another.
+            _addShortOptionTo(parts, rest, args)
+
+class DryRunOption(AbstractShortOption):
+    """
+    Represents '-n' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        (first, rest) = _firstLetterAndRest(firstArg)
+        assert first == "n"
+        parts.setDoExecute(False)
+        parts.setVerbosityLevel(1)
+        if rest:
+            # Assume this argumentless option has been combined with another.
+            _addShortOptionTo(parts, rest, args)
+
+class StartingDirectoryOption(AbstractShortOption):
+    """
+    Represents '-D' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        assert firstArg.startswith("D")
+        arg = self._firstArgument(firstArg, args, parts)
+        if arg is not None:
+            parts.findCommand().addStartingDirectory(arg)
+
+class SkippedDirectoryOption(AbstractShortOption):
+    """
+    Represents '-S' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        assert firstArg.startswith("S")
+        arg = self._firstArgument(firstArg, args, parts)
+        if arg is not None:
+            parts.findCommand().addSkippedDirectory(arg)
+
+class ExtensionOption(AbstractShortOption):
+    """
+    Represents '-e' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        assert firstArg.startswith("e")
+        arg = self._firstArgument(firstArg, args, parts)
+        if arg is not None:
+            if not arg.startswith("."):
+                arg = "." + arg
+            parts.findCommand().addBasenameOption("-name '*" + arg + "'")
+
+class NamePrefixOption(AbstractShortOption):
+    """
+    Represents '-p' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        assert firstArg.startswith("p")
+        arg = self._firstArgument(firstArg, args, parts)
+        if arg is not None:
+            parts.findCommand().addBasenameOption("-name '" + arg + "*'")
+
+class NameContainsOption(AbstractShortOption):
+    """
+    Represents '-c' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        assert firstArg.startswith("c")
+        arg = self._firstArgument(firstArg, args, parts)
+        if arg is not None:
+            parts.findCommand().addBasenameOption("-name '*" + arg + "*'")
+
+class CaselessNameContainsOption(AbstractShortOption):
+    """
+    Represents '-i' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        assert firstArg.startswith("i")
+        arg = self._firstArgument(firstArg, args, parts)
+        if arg is not None:
+            parts.findCommand().addBasenameOption("-iname '*" + arg + "*'")
+
+class NameSuffixOption(AbstractShortOption):
+    """
+    Represents '-s' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        assert firstArg.startswith("s")
+        arg = self._firstArgument(firstArg, args, parts)
+        if arg is not None:
+            parts.findCommand().addBasenameOption("-name '*" + arg + "'")
+
+class NameFormatOption(AbstractShortOption):
+    """
+    Represents '-f' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        assert firstArg.startswith("f")
+        arg = self._firstArgument(firstArg, args, parts)
+        if arg is not None:
+            fmt = _parseBasenameFormat(arg, parts)
+            if fmt is not None:
+                parts.findCommand().addBasenameOption(fmt.toFindOption())
+
+class FiletypesOption(AbstractShortOption):
+    """
+    Represents '-t' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        assert firstArg.startswith("t")
+        arg = self._firstArgument(firstArg, args, parts)
+        if arg is not None:
+            findCmd = parts.findCommand()
+            areExcluded = False
+            for ch in arg:
+                if ch == "-":
+                    areExcluded = True
+                elif areExcluded:
+                    findCmd.addExcludedFiletype(ch)
+                else:
+                    findCmd.addIncludedFiletype(ch)
+
+class PatternOption(AbstractShortOption):
+    """
+    Represents '-g' options.
+    """
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        firstArg = args.pop()  # see _addShortOptionTo()
+        (first, rest) = _firstLetterAndRest(firstArg)
+        assert first == "g"
+        cmd = GrepCommand()
+        while rest:
+            (first, rest) = _firstLetterAndRest(rest)
+            if first in _zeroArgPatternSubopts:
+                cmd.addOption("-" + first)
+            elif first in _oneArgPatternSubopts:
+                (arg, rest) = _nonnegativeIntegerAndRest(rest)
+                if arg is None:
+                    arg = _defaultPatternSuboptArg
+                cmd.addOption("-" + first + " " + str(arg))
+            else:
+                parts.addErrorMessage(_unknownPatternSuboptionMsg.
+                                      format(first, firstArg))
+        if args:
+            cmd.setPattern(args.pop())
+        else:
+            parts.addErrorMessage(_patternMissingMsg.format(firstArg))
+        parts.addGrepCommand(cmd)
+
+
+class AbstractFindOption(AbstractOption):
+    """
+    An abstract base class for classes that represent options to this command
+    that map (more or less) directly to an option to a find command.
+    """
+
+    def __init__(self, name, numArgs):
+        """
+        Initializes us with the name 'name' of this option and the number of
+        arguments 'numArgs' that it takes.
+        """
+        assert name
+        assert numArgs >= 0
+        AbstractOption.__init__(self, name)
+        self._numArgs = numArgs
+
+    def prefixedOptionName(self):
+        result = "--" + self._name
+        assert result
+        return result
+
+    def addCommandParts(self, parts, args):
+        assert parts is not None
+        assert args is not None
+        # print("type of self = {}".format(type(self)))
+        # print("numArgs = {}".format(self._numArgs))
+        if self._checkEnoughArguments(args, self._numArgs, parts):
+            self._reallyAddCommandParts(parts, args)
+
+    def _reallyAddCommandParts(self, parts, args):
+        """
+        Adds to the CommandParts 'parts' the command parts corresponding to
+        this option, with our option's arguments coming from the end (NOT the
+        start) of 'args', where 'args' has already been determined to have
+        the minimum number of arguments we need.
+
+        See addCommandParts().
+        """
+        assert parts is not None
+        assert len(args) >= self._numArgs
+        findOpt = "-" + self._name
+        for n in range(self._numArgs):
+            findOpt += ' "{}"'.format(args.pop())
+        self._addOptionToFindCommand(findOpt, parts.findCommand())
+
+    def _addOptionToFindCommand(self, opt, findCmd):
+        """
+        Adds the option 'opt' to the FindCommand 'findCmd'.
+        """
+        # assert opt is not None
+        # assert findCmd is not None
+        raise NotImplementedError
+
+class InitialFindOption(AbstractFindOption):
+
+    def _addOptionToFindCommand(self, opt, findCmd):
+        assert opt is not None
+        assert findCmd is not None
+        findCmd.addInitialOption(opt)
+
+class EarlyFindOption(AbstractFindOption):
+
+    def _addOptionToFindCommand(self, opt, findCmd):
+        assert opt is not None
+        assert findCmd is not None
+        findCmd.addEarlyOption(opt)
+
+class LateFindOption(AbstractFindOption):
+
+    def _addOptionToFindCommand(self, opt, findCmd):
+        assert opt is not None
+        assert findCmd is not None
+        findCmd.addLateOption(opt)
+
+class DepthFindOption(AbstractFindOption):
+    """
+    The class of Option that represents the "--depth" option to our command
+    (which converts into a -mindepth and/or -maxdepth option for the find
+    command).
+    """
+    def __init__(self, name):
+        """
+        Initializes us with the name 'name' of this option,
+        """
+        assert name
+        AbstractFindOption.__init__(self, name, 1)
+
+    def _reallyAddCommandParts(self, parts, args):
+        """
+        Adds to the CommandParts 'parts' the command parts corresponding to
+        this option, with our option's arguments coming from the end (NOT the
+        start) of 'args', where 'args' has already been determined to have
+        the minimum number of arguments we need.
+
+        See addCommandParts().
+        """
+        assert parts is not None
+        assert len(args) >= self._numArgs
+        arg = args.pop()
+        minDepth = None
+        maxDepth = None
+        isArgInvalid = False
+        levels = arg.split("-")
+        numLevels = len(levels)
+        assert numLevels > 0
+        if numLevels > 2:
+            isArgInvalid = True
+        elif numLevels == 1:
+            try:
+                minDepth = int(arg)
+                maxDepth = minDepth
+                isArgInvalid = (minDepth < 0)
+            except ValueError:
+                isArgInvalid = True
+        else:
+            assert numLevels == 2
+            try:
+                minDepth = int(levels[0])
+                isArgInvalid = (minDepth < 0)
+                if len(levels[1]) > 0:
+                    maxDepth = int(levels[1])
+                    isArgInvalid = (maxDepth < minDepth)
+            except ValueError:
+                isArgInvalid = True
+        if isArgInvalid:
+            msg = _invalidDepthArgMsg.format(arg, "--" + self._name)
+            parts.addErrorMessage(msg)
+        else:
+            assert (minDepth is not None) or (maxDepth is not None)
+            findCmd = parts.findCommand()
+            if maxDepth is not None:
+                findCmd.addEarlyOption("-maxdepth {}".format(maxDepth))
+            if minDepth is not None:
+                findCmd.addEarlyOption("-mindepth {}".format(minDepth))
+
+
+class Command(object):
+    """
+    The interface implemented by classes that represent command line
+    commands.
+    """
+
+    def toCommandText(self):
+        """
+        Returns the string/text of the command line command that we
+        represent.
+        """
+        # assert result
+        raise NotImplementedError
+
+class FindCommand(Command):
+    """
+    Represents a find command.
+    """
+
+    def __init__(self):
+        """
+        Initializes this command.
+        """
+        Command.__init__(self)
+        self._basenameOptions = []
+        self._includedFiletypes = []
+        self._excludedFiletypes = []
+        self._initialOptions = ["-O{}".format(_findOptimizationLevel)]
+        self._earlyOptions = []
+        self._lateOptions = []
+        self._startingDirs = []
+        self._skippedDirs = []
+
+    def addInitialOption(self, opt):
+        """
+        Adds 'opt' to the end of our list of initial options: ones that will
+        precede the director{y,ies} to start searching from.
+        """
+        assert opt is not None
+        self._initialOptions.append(opt)
+
+    def addEarlyOption(self, opt):
+        """
+        Adds 'opt' to the end of our list of early options: ones that will
+        follow the director{y,ies} to start searching from, but that must
+        precede all of the late options (if there are any).
+
+        Note: this should be used for find command pseudo-options like
+        "-xdev" and "-mindepth", though not true find command options like
+        "-D" and "-H": see the man page for the find command for a complete
+        list of each type of find command option.
+
+        See addLateOption().
+        """
+        assert opt is not None
+        self._earlyOptions.append(opt)
+
+    def addLateOption(self, opt):
+        """
+        Adds 'opt' to the end of our list of late options: ones that will
+        follow the director{y,ies} to start searching from and that will also
+        follow any and all early options.
+
+        Note: this should be used for the majority of the find command
+        options/subexpressions: specifically, it should be used for all tests
+        (like "-amin"), actions (like "-exec") and operators (like "-and").
+        See the man page for the find command for a complete list of each
+        type of option/subexpression.
+
+        See addEarlyOption().
+        """
+        assert opt is not None
+        self._lateOptions.append(opt)
+
+    def addBasenameOption(self, opt):
+        """
+        Adds the option 'opt' to the end of our list of options that
+        select/limit the basename of the files to search for.
+        """
+        assert opt is not None
+        self._basenameOptions.append(opt)
+
+    def addIncludedFiletype(self, ftype):
+        """
+        Adds 'ftype' to the end of our list of filetypes that are to be
+        included in the search.
+        """
+        assert len(ftype) == 1
+        self._includedFiletypes.append(ftype)
+
+    def addExcludedFiletype(self, ftype):
+        """
+        Adds 'ftype' to the end of our list of filetypes that are to be
+        excluded from the search.
+        """
+        assert len(ftype) == 1
+        self._excludedFiletypes.append(ftype)
+
+    def addStartingDirectory(self, d):
+        """
+        Adds the pathname 'd' to the end of our list of directories from
+        which to start searching. ('d' is assumed to be a string).
+        """
+        assert d
+        self._startingDirs.append("'{}'".format(d))
+
+    def addSkippedDirectory(self, d):
+        """
+        Adds the pathname 'd' to the end of our list of directories that we
+        skip entirely: the directory itself can't match, nor can anything in
+        or under it.
+        """
+        assert d
+        self._skippedDirs.append("'{}'".format(d))
+
+    def toCommandText(self):
+        """
+        Returns the string/text of the command line command that we
+        represent.
+        """
+        result = "find"
+        if self._initialOptions:
+            result += " " + " ".join(self._initialOptions)
+        if self._startingDirs:
+            result += " " + " ".join(self._startingDirs)
+        else:
+            result += " " + _defaultStartingDir
+        if self._earlyOptions:
+            result += " " + " ".join(self._earlyOptions)
+        if self._skippedDirs:
+            startDirs = self._startingDirs
+            if not startDirs:
+                startDirs = ["."]
+            for d in startDirs:
+                result += " " + \
+                    " ".join(["-path {}/{} -prune -o".format(d, x)
+                              for x in self._skippedDirs])
+        if self._excludedFiletypes:
+            result += " " + " ".join(["-type {} -prune -o".format(x) for x
+                                      in self._excludedFiletypes])
+
+        num = len(self._includedFiletypes)
+        if num > 1:
+            result += " \( " + " -o ".join(["-type {}".format(x) for x in
+                                            self._includedFiletypes]) + " \)"
+        elif num == 1:
+            result += " -type " + self._includedFiletypes[0]
+
+        num = len(self._basenameOptions)
+        if num > 1:
+            result += " \( " + " -a ".join(self._basenameOptions) + " \)"
+        elif num == 1:
+            result += " " + self._basenameOptions[0]
+
+        if self._lateOptions:
+            result += " " + " ".join(self._lateOptions)
+        assert result
+        return result
+
+class GrepCommand(Command):
+    """
+    Represents a grep command.
+    """
+
+    def __init__(self):
+        """
+        Initializes this command.
+        """
+        Command.__init__(self)
+        self._options = []
+        self._pattern = None
+
+    def addOption(self, opt):
+        """
+        Adds the string 'opt' as the newest/rightmost option for our grep
+        command.
+        """
+        assert opt
+        self._options.append(opt)
+
+    def prependOption(self, opt):
+        """
+        Adds the string 'opt' as the oldest/leftmost option for our grep
+        command.
+
+        Note: prepending rather than adding/appending an option allows later
+        options to override it.
+        """
+        assert opt
+        self._options.insert(0, opt)
+
+    def setPattern(self, pat):
+        """
+        Sets 'pat' to be the pattern part of this command.
+        """
+        assert pat is not None
+        self._pattern = pat
+
+    def hasPattern(self):
+        """
+        Returns True iff the pattern part of this command has been set (by a
+        call to our setPattern() method).
+        """
+        return (self._pattern is not None)
+
+    def pattern(self):
+        """
+        Returns the pattern part of this command.
+        """
+        assert self.hasPattern()
+        result = self._pattern
+        assert result is not None
+        return result
+
+    def toCommandText(self):
+        result = "grep"
+        if self._options:
+            result += " " + " ".join(self._options)
+        if self.hasPattern():
+            result += " '" + self.pattern() + "'"
+        assert result
+        return result
+
+class CommandParts(object):
+    """
+    Represents all of the parts of the command line that an invocation of
+    this command translates into.
+    """
+
+    def __init__(self):
+        self._findCommand = FindCommand()
+        self._grepCommands = []
+        self._errorMessages = []
+        self._verbosityLevel = 0
+        self._doExecute = True
+        self._doShowUsage = False
+        self._doMatchBinaryFiles = False
+        self._userCommandWords = None
+        assert self.grepCommandCount() == 0
+        assert not self.hasErrorMessages()
+        assert self.doExecute()
+        assert not self.doShowUsage()
+        assert not self.hasUserCommand()
+
+    def doExecute(self):
+        """
+        Returns True iff this command should actually be executed.
+        """
+        return self._doExecute
+
+    def setDoExecute(self, doExec):
+        """
+        Sets whether this command should actually be executed to 'doExec'.
+        """
+        self._doExecute = doExec
+
+    def doMatchBinaryFiles(self):
+        """
+        Returns True iff our first 'grep' subcommand - if we have one -
+        should match binary files: if it doesn't then it will ignore them
+        (that is, treat them as though they contain no matches).
+        """
+        return self._doMatchBinaryFiles
+
+    def setDoMatchBinaryFiles(self, doMatch):
+        """
+        Sets whether this command's first 'grep' subcommand - if we have
+        one - should match binary files: if it doesn't then it will ignore
+        them (that is, treat them as though they contain no matches).
+        """
+        self._doMatchBinaryFiles = doMatch
+
+    def verbosityLevel(self):
+        """
+        Returns our verbosity level: 0 fo normal, 1 for extra.
+        """
+        result = self._verbosityLevel
+        assert result >= 0
+        assert result <= 1
+        return result
+
+    def setVerbosityLevel(self, newLevel):
+        """
+        Sets our verbosity level to 'newLevel'.
+        """
+        assert newLevel >= 0
+        assert newLevel <= 1
+        self._verbosityLevel = newLevel
+
+    def doShowUsage(self):
+        """
+        Returns True iff our command's usage message should be shown (instead
+        of performing the search).
+        """
+        return self._doShowUsage
+
+    def setDoShowUsage(self, doShow):
+        """
+        Sets whether our command's usage message should be shown (instead of
+        performing the search) to 'doShow'.
+        """
+        self._doShowUsage = doShow
+
+    def hasErrorMessages(self):
+        """
+        Returns True iff one or more messages have been added to our list of
+        error messages.
+
+        See addErrorMessage().
+        """
+        return (len(self._errorMessages) > 0)
+
+    def addErrorMessage(self, msg):
+        """
+        Adds 'msg' to the end of our list of error messages.
+        """
+        assert msg
+        self._errorMessages.append(msg)
+        assert self.hasErrorMessages()
+
+    def writeAllErrorMessages(self, w):
+        """
+        Writes all of our error messages to the open file 'w', or writes
+        nothing to 'w' if we don't have any error messages.
+        """
+        assert w is not None
+        if self.hasErrorMessages():
+            isFirst = True
+            for msg in self._errorMessages:
+                if isFirst:
+                    isFirst = False
+                else:
+                    w.write("\n")
+                w.write(msg)
+                w.write(".\n")
+
+    def findCommand(self):
+        """
+        Returns the FindCommand that represents the find command that is a
+        subcommand of this command.
+        """
+        result = self._findCommand
+        assert result is not None
+        return result
+
+    def addGrepCommand(self, cmd):
+        """
+        Adds the GrepCommand 'cmd' to the end of our list of grep commands
+        that are subcommands of this command.
+        """
+        assert cmd is not None
+        self._grepCommands.append(cmd)
+
+    def grepCommandCount(self):
+        """
+        Returns the number of grep commands that are subcommands of this
+        command.
+        """
+        result = len(self._grepCommands)
+        assert result >= 0
+        return result
+
+    def grepCommand(self, i):
+        """
+        Returns the ('i'+1)th grep command that is a subcommand of this
+        command.
+        """
+        assert i >= 0
+        assert i < self.grepCommandCount()
+        result = self._grepCommands[i]
+        assert result is not None
+        return result
+
+    def allGrepCommands(self):
+        """
+        Returns a list of all of the grep commands that are subcommands of
+        this command: each item in the list is a GrepCommand.
+        """
+        result = self._grepCommands
+        assert result is not None
+        assert len(result) == self.grepCommandCount()
+        return result
+
+    def addUserCommandWords(self, words):
+        """
+        Adds the strings/words in the list 'words' to the end of our list of
+        words that make up a user-specified command to which is to be piped
+        the results of our search.
+        """
+        assert words is not None
+        if words:
+            dest = self._userCommandWords
+            if dest is None:
+                dest = []
+                self._userCommandWords = dest
+            for w in words:
+                dest.append(w)
+        assert (not words) or self.hasUserCommand()
+
+    def hasUserCommand(self):
+        """
+        Returns True iff we contain a user-specified command to which to pipe
+        the results of our search.
+        """
+        return (self._userCommandWords is not None)
+
+    def userCommandText(self):
+        """
+        Returns the text of the user-specified command to which to pipe the
+        results of our search.
+        """
+        assert self.hasUserCommand()
+        result = " ".join(self._userCommandWords)
+        assert result
+        return result
+
+
+# Functions.
+
+def _firstLetterAndRest(txt):
+    """
+    Returns a pair whose first item is the first letter in the string 'txt'
+    (or an empty string iff 'txt' is empty) and whose second item is the
+    rest of the characters in 'txt', in order.
+    """
+    assert txt is not None
+    result = (txt[:1], txt[1:])
+    assert len(result) == 2
+    assert len(result[0]) <= 1
+    assert len(txt) == len(result[0]) + len(result[1])
+    return result
+
+def _nonnegativeIntegerAndRest(txt):
+    """
+    Returns a pair whose first item is the non-negative integer consisting of
+    the digits at the start of the string 'txt' (or None if 'txt doesn't
+    start with a digit), and whose second item is all of the other characters
+    in 'txt'.
+    """
+    assert txt is not None  # though it may be empty
+    numDigits = 0
+    for i in range(len(txt)):
+        if txt[i].isdigit():
+            numDigits += 1
+        else:
+            break  # for
+    if numDigits > 0:
+        result = (int(txt[:numDigits]), txt[numDigits:])
+    else:
+        result = (None, txt)
+    assert len(result) == 2
+    assert result[0] is None or result >= 0
+    assert result[1] is not None  # though it may be empty
+    return result
+
+
+def _buildLongOptionsMap():
+    """
+    Builds and returns a map/dictionary whose keys are the names of all of
+    our command's long options (without the leading dashes), and whose values
+    are Option instances corresponding to the long options.
+    """
+    result = {}
+    for name in _zeroArgumentEarlyFindOptionNames:
+        result[name] = EarlyFindOption(name, 0)
+    for name in _zeroArgumentLateFindOptionNames:
+        result[name] = LateFindOption(name, 0)
+    for name in _oneArgumentLateFindOptionNames:
+        result[name] = LateFindOption(name, 1)
+    name = _depthOptionName
+    result[name] = DepthFindOption(name)
+    assert result is not None
+    return result
+
+def _buildShortOptionsMap():
+    """
+    Builds and returns a map/dictionary whose keys are the names of all of
+    our command's short options (without the leading dash), and whose values
+    are the Option instances corresponding to the short options.
+    """
+    result = {}
+    name = "b"
+    result[name] = MatchBinaryFilesOption(name)
+    name = "c"
+    result[name] = NameContainsOption(name)
+    name = "D"
+    result[name] = StartingDirectoryOption(name)
+    name = "e"
+    result[name] = ExtensionOption(name)
+    name = "f"
+    result[name] = NameFormatOption(name)
+    name = "g"
+    result[name] = PatternOption(name)
+    name = "i"
+    result[name] = CaselessNameContainsOption(name)
+    name = "n"
+    result[name] = DryRunOption(name)
+    name = "p"
+    result[name] = NamePrefixOption(name)
+    name = "s"
+    result[name] = NameSuffixOption(name)
+    name = "S"
+    result[name] = SkippedDirectoryOption(name)
+    name = "t"
+    result[name] = FiletypesOption(name)
+    name = "v"
+    result[name] = VerboseOption(name)
+    assert result is not None
+    return result
+
+def _smartMatchKeys(k, m):
+    """
+    Attempts to find a match for the key 'k' among the keys of the map 'm'
+    and returns a list of the (key, item) pairs corresponding to all of the
+    matching keys.
+
+    Matching keys are found in the following manner:
+
+        - if 'k' is equal to one of 'm''s keys then it will be the only
+          matching key (even if it's equal to the start of a longer key)
+        - otherwise the matching keys are all of 'm''s keys that start
+          with 'k': there may be zero, one or more such matching keys
+
+    The order of the items in the returned list is undefined.
+
+    Note: this function is a copy of the ut_smartMatchKeys() function that
+    is in the utilities.py package in my audiofs project.
+    """
+    if k in m:
+        result = [(k, m[k])]
+    else:
+        result = []
+        for (key, val) in m.items():
+            if key.startswith(k):
+                result.append((key, val))
+    assert result is not None
+    return result
+
+def _addLongOptionTo(parts, optionName, args):
+    """
+    Adds to the CommandParts 'parts' the command parts corresponding to the
+    long option named 'optionName' (which is assumed NOT to start with any
+    dashes) and the appropriate number of arguments from the end (and NOT the
+    start) of 'args'.
+    """
+    assert optionName is not None   # though it may be empty
+    assert args is not None         # though it may be empty
+    if optionName in _longHelpOpts:
+        parts.setDoShowUsage(True)
+    else:
+        matches = _smartMatchKeys(optionName, _allLongOpts)
+        numMatches = len(matches)
+        if numMatches == 1:
+            matches[0][1].addCommandParts(parts, args)
+        else:
+            opt = "--" + optionName
+            if numMatches == 0:
+                msg = _unmatchedLongOptionMsg.format(opt)
+            else:
+                msg = ", ".join([kv[1].prefixedOptionName() for
+                                 kv in matches])
+                msg = _multipleLongOptionMatchesMsg.format(numMatches, opt,
+                                                           msg)
+            parts.addErrorMessage(msg)
+
+def _addShortOptionTo(parts, optionName, args):
+    """
+    Adds to the CommandParts 'parts' the command parts corresponding to the
+    short option whose name is the first letter in 'optionName' (which is
+    assumed NOT to start with a dash) and the appropriate number of arguments
+    from the end (and NOT the start) of 'args'.
+    """
+    assert optionName is not None   # though it may be empty
+    assert args is not None         # though it may be empty
+    (first, rest) = _firstLetterAndRest(optionName)
+    if first in _shortHelpOpts:
+        parts.setDoShowUsage(True)
+    else:
+        opt = _allShortOpts.get(first)
+        if opt is not None:
+            args.append(optionName)  # since it may contain the first arg.
+            opt.addCommandParts(parts, args)
+        else:
+            prefixedName = "-" + first
+            parts.addErrorMessage(_unmatchedShortOptionMsg.
+                                  format(prefixedName))
+
+def _parseBasenameFormat(formatString, parts):
+    """
+    Parses the format string 'formatString' and if it's valid returns the
+    BasenameFormat instance that represents the same information; otherwise
+    None is returned and one or more error messages are added to the
+    CommandParts instance 'parts'.
+    """
+    assert formatString
+    assert parts is not None
+    wasError = False
+    result = BasenameFormat()
+    for ch in formatString:
+        if ch in _allFormatChars:
+            if ch == "a":
+                result.setCanBeLowercase(True)
+                result.setCanBeUppercase(True)
+            elif ch == "b":
+                result.setIsBackup(True)
+            elif ch == "l":
+                result.setCanBeLowercase(True)
+            elif ch == "n":
+                result.setCanBeNumeric(True)
+            elif ch == "p":
+                result.setIsPrefix(True)
+            elif ch == "s":
+                result.setIsSuffix(True)
+            else:
+                assert ch == "u"
+                #   otherwise 'ch' is an unknown/unexpected format char.
+                result.setCanBeUppercase(True)
+        else:
+            wasError = True
+            parts.addErrorMessage(_invalidFormatCharMsg.format(ch,
+                                                               formatString))
+
+    if not result.isBackup():
+        if not result.hasCharactersToMatch():
+            wasError = True
+            parts.addErrorMessage(_noBackupOrCharsInFormatMsg.
+                                  format(formatString))
+    if wasError:
+        assert parts.hasErrorMessages()
+        result = None
+
+    # 'result' can be None
+    assert (result is not None) or parts.hasErrorMessages()
+    #      (result is None) implies parts.hasErrorMessages()
+    return result
+
+def _parseArgumentsIntoCommandParts(allArgs):
+    """
+    Parses the command line arguments 'allArgs' (whose first item is the name
+    of the program) into a CommandParts that represents the find and grep
+    commands that they translate into.
+    """
+    assert allArgs is not None
+    assert len(allArgs) > 0
+    args = allArgs[1:]  # make a copy we can consume
+    args.reverse()
+    userCmdWords = None
+    result = CommandParts()
+    while len(args) > 0:
+        a = args.pop()
+        if userCmdWords is not None:
+            userCmdWords.append(a)
+        elif a == "--":
+            userCmdWords = []
+        elif a.startswith("--"):
+            _addLongOptionTo(result, a[2:], args)
+        elif a.startswith("-"):
+            _addShortOptionTo(result, a[1:], args)
+        else:
+            result.addErrorMessage(_unexpectedArgumentMsg.format(a))
+            break  # while
+        # print("arg = {}".format(a))
+    if userCmdWords is not None:
+        result.addUserCommandWords(userCmdWords)
+    assert result is not None
+    return result
+
+def _reportUsage(w, parts, programName):
+    """
+    Writes to the file object 'w' a message describing how to use this
+    command, preceded by each and every one of the error messages in the
+    CommandParts 'parts'. The pathname of this program is 'programName'.
+    """
+    assert w is not None
+    assert parts.hasErrorMessages()
+    assert programName
+    parts.writeAllErrorMessages(w)
+    _writeShortUsageMessage(w, programName)
+
+def _writeShortUsageMessage(w, programName):
+    """
+    Writes out the short version of our usage message to the file object 'w',
+    where the pathname of this program is 'programName'.
+    """
+    assert w is not None
+    assert programName is not None
+    w.write(_shortUsageMsg.format(progName = os.path.basename(programName)))
+    w.write("\n")
+    # w.write("{}\n".format('-' * 65))
+
+def _writeLongUsageMessage(w, programName):
+    """
+    Writes out the long version of our usage message to the file object 'w',
+    where the pathname of this program is 'programName'.
+    """
+    assert w is not None
+    assert programName is not None
+    w.write(_longUsageMsg.format(progName = os.path.basename(programName)))
+    w.write("\n")
+    # w.write("{}\n".format('-' * 65))
+
+
+# Constants, part 2.
+
+# Maps each long option's name to the Option instance that describe it.
+_allLongOpts = _buildLongOptionsMap()
+
+# Maps each short option's name to the Option instance that describe it.
+_allShortOpts = _buildShortOptionsMap()
+
+
+# Main program.
+
+if __name__ == '__main__':
+    rc = 0
+    cmdParts = _parseArgumentsIntoCommandParts(sys.argv)
+    if cmdParts.doShowUsage():
+        _writeLongUsageMessage(sys.stdout, sys.argv[0])
+        rc = 0
+    elif cmdParts.hasErrorMessages():
+        _reportUsage(sys.stderr, cmdParts, sys.argv[0])
+        rc = 1
+    else:
+        userCmd = None
+        if cmdParts.hasUserCommand():
+            userCmd = cmdParts.userCommandText()
+        grepCount = cmdParts.grepCommandCount()
+        cmd = cmdParts.findCommand().toCommandText()
+        if grepCount > 0:
+            cmd += " -print0"
+            isFirst = True
+            for i in range(grepCount):
+                cmd += " | "
+                isLast = (i == (grepCount - 1))
+                grepCmd = cmdParts.grepCommand(i)
+                if isFirst:
+                    cmd += "xargs -0r "
+                    for opt in _firstGrepCommandOptions:
+                        grepCmd.prependOption(opt)
+                    if not cmdParts.doMatchBinaryFiles():
+                        grepCmd.prependOption("-I")  # ignore binary files
+                    isFirst = False
+                cmd += grepCmd.toCommandText()
+            if userCmd is not None:
+                # Pass each line to the user command.
+                cmd += " | xargs -d'\\n' " + userCmd
+        elif userCmd is not None:
+            cmd += " -print0 | xargs -0r " + userCmd
+        else:
+            # Remove any leading './' prefixes from pathnames (just because
+            # they're unnecessary).
+            cmd += " | sed 's_^\./__'"
+        if cmdParts.verbosityLevel() > 0:
+            print(cmd, file = sys.stderr)
+        if cmdParts.doExecute():
+            try:
+                rc = subprocess.call(cmd, shell = True, bufsize = 0)
+            except BaseException as ex:
+                print("Search failed: {}".format(str(ex)), file = sys.stderr)
+                rc = 2
+    sys.exit(rc)
