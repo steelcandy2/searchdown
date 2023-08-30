@@ -1322,7 +1322,7 @@ def _nonnegativeIntegerAndRest(txt):
     else:
         result = (None, txt)
     assert len(result) == 2
-    assert result[0] is None or result >= 0
+    assert result[0] is None or result[0] >= 0
     assert result[1] is not None  # though it may be empty
     return result
 
