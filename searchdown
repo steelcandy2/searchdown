@@ -1604,7 +1604,6 @@ if __name__ == '__main__':
             isFirst = True
             for i in range(grepCount):
                 cmd += " | "
-                isLast = (i == (grepCount - 1))
                 grepCmd = cmdParts.grepCommand(i)
                 if isFirst:
                     cmd += "xargs -0r "
