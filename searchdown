@@ -108,7 +108,7 @@ but there are {}"""
 
 _onlyOneOptionArgMsg = """
 There must be at least {} arguments after the '{}' option,
-but there us only {}"""
+but there is only {}"""
 
 
 _unexpectedArgumentMsg = """
