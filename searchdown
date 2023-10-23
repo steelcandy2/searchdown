@@ -831,14 +831,6 @@ class DepthFindOption(AbstractFindOption):
         AbstractFindOption.__init__(self, name, 1)
 
     def _reallyAddCommandParts(self, parts, args):
-        """
-        Adds to the CommandParts 'parts' the command parts corresponding to
-        this option, with our option's arguments coming from the end (NOT the
-        start) of 'args', where 'args' has already been determined to have
-        the minimum number of arguments we need.
-
-        See addCommandParts().
-        """
         assert parts is not None
         assert len(args) >= self._numArgs
         arg = args.pop()
