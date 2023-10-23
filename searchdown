@@ -1014,14 +1014,14 @@ class FindCommand(Command):
 
         num = len(self._includedFiletypes)
         if num > 1:
-            result += " \( " + " -o ".join(["-type {}".format(x) for x in
-                                            self._includedFiletypes]) + " \)"
+            result += r" \( " + " -o ".join(["-type {}".format(x) for x in
+                                        self._includedFiletypes]) + r" \)"
         elif num == 1:
             result += " -type " + self._includedFiletypes[0]
 
         num = len(self._basenameOptions)
         if num > 1:
-            result += " \( " + " -a ".join(self._basenameOptions) + " \)"
+            result += r" \( " + " -a ".join(self._basenameOptions) + r" \)"
         elif num == 1:
             result += " " + self._basenameOptions[0]
 
@@ -1622,7 +1622,7 @@ if __name__ == '__main__':
         else:
             # Remove any leading './' prefixes from pathnames (just because
             # they're unnecessary).
-            cmd += " | sed 's_^\./__'"
+            cmd += r" | sed 's_^\./__'"
         if cmdParts.verbosityLevel() > 0:
             print(cmd, file = sys.stderr)
         if cmdParts.doExecute():
