@@ -460,6 +460,14 @@ class AbstractOption(Option):
         Option.__init__(self)
         self._name = name
 
+    def bareName(self):
+        """
+        Returns the bare this option (without any leading '-' or '--').
+        """
+        result = self._name
+        assert result
+        return result
+
     def _checkEnoughArguments(self, args, numArgsRequired, parts):
         """
         Checks that 'args' contains at least 'numArgsRequired' arguments,
@@ -489,7 +497,7 @@ class AbstractShortOption(AbstractOption):
     """
 
     def prefixedOptionName(self):
-        result = "-" + self._name
+        result = "-" + self.bareName()
         assert result
         return result
 
@@ -752,7 +760,7 @@ class AbstractFindOption(AbstractOption):
         self._numArgs = numArgs
 
     def prefixedOptionName(self):
-        result = "--" + self._name
+        result = "--" + self.bareName()
         assert result
         return result
 
@@ -775,7 +783,7 @@ class AbstractFindOption(AbstractOption):
         """
         assert parts is not None
         assert len(args) >= self._numArgs
-        findOpt = "-" + self._name
+        findOpt = "-" + self.bareName()
         for n in range(self._numArgs):
             findOpt += ' "{}"'.format(args.pop())
         self._addOptionToFindCommand(findOpt, parts.findCommand())
@@ -860,7 +868,7 @@ class DepthFindOption(AbstractFindOption):
             except ValueError:
                 isArgInvalid = True
         if isArgInvalid:
-            msg = _invalidDepthArgMsg.format(arg, "--" + self._name)
+            msg = _invalidDepthArgMsg.format(arg, self.prefixedOptionName())
             parts.addErrorMessage(msg)
         else:
             assert (minDepth is not None) or (maxDepth is not None)
