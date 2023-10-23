@@ -854,7 +854,7 @@ class DepthFindOption(AbstractFindOption):
             try:
                 minDepth = int(levels[0])
                 isArgInvalid = (minDepth < 0)
-                if len(levels[1]) > 0:
+                if levels[1]:
                     maxDepth = int(levels[1])
                     isArgInvalid = (maxDepth < minDepth)
             except ValueError:
